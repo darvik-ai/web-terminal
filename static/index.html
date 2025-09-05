@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Web Terminal</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
+    <style>
+        body { background: #222; color: #eee; }
+        #terminal { width: 100vw; height: 100vh; }
+    </style>
+</head>
+<body>
+    <div id="terminal"></div>
+    <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+    <script>
+        const term = new window.Terminal();
+        term.open(document.getElementById('terminal'));
+        term.write('Welcome to Ubuntu Web Terminal\r\n');
+        let ws = new WebSocket(`ws://${location.host}/ws`);
+        term.prompt = () => {
+            term.write('\r\n$ ');
+        };
+        term.prompt();
+        let cmd = '';
+        term.onKey(e => {
+            const char = e.key;
+            if (char === '\r') {
+                ws.send(cmd);
+                cmd = '';
+            } else if (char === '\u007f') {
+                if (cmd.length > 0) {
+                    cmd = cmd.slice(0, -1);
+                    term.write('\b \b');
+                }
+            } else {
+                cmd += char;
+                term.write(char);
+            }
+        });
+        ws.onmessage = (event) => {
+            term.write('\r\n' + event.data);
+            term.prompt();
+        };
+    </script>
+</body>
+</html>
