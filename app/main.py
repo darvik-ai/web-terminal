@@ -4,6 +4,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import asyncio
 import os
+import pty
+import threading
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -16,33 +18,42 @@ def get(request: Request):
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    # Start a persistent bash process
-    process = await asyncio.create_subprocess_exec(
-        "bash",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=os.environ.copy()
-    )
 
-    async def read_from_bash():
-        while True:
-            data = await process.stdout.read(1024)
-            if not data:
-                break
-            await websocket.send_text(data.decode(errors="ignore"))
+    loop = asyncio.get_event_loop()
+    # Create a PTY for the bash shell
+    master_fd, slave_fd = pty.openpty()
 
-    reader_task = asyncio.create_task(read_from_bash())
-    try:
-        while True:
-            msg = await websocket.receive_text()
-            if process.stdin:
-                process.stdin.write(msg.encode() + b"\n")
-                await process.stdin.drain()
-    except Exception:
-        pass
-    finally:
-        reader_task.cancel()
-        if process.stdin:
-            process.stdin.close()
-        await process.wait()
+    pid = os.fork()
+    if pid == 0:
+        # Child process: replace with bash
+        os.setsid()
+        os.dup2(slave_fd, 0)
+        os.dup2(slave_fd, 1)
+        os.dup2(slave_fd, 2)
+        os.execv("/bin/bash", ["bash"])
+    else:
+        # Parent process: stream PTY I/O
+        def read_pty():
+            while True:
+                try:
+                    data = os.read(master_fd, 1024)
+                    if not data:
+                        break
+                    coro = websocket.send_text(data.decode(errors="ignore"))
+                    asyncio.run_coroutine_threadsafe(coro, loop)
+                except Exception:
+                    break
+
+        thread = threading.Thread(target=read_pty, daemon=True)
+        thread.start()
+
+        try:
+            while True:
+                msg = await websocket.receive_text()
+                os.write(master_fd, msg.encode() + b"\n")
+        except Exception:
+            pass
+        finally:
+            thread.join(timeout=1)
+            os.close(master_fd)
+            os.close(slave_fd)
